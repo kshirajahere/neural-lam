@@ -119,8 +119,8 @@ class WeatherDataset(torch.utils.data.Dataset):
         if self.datastore.is_forecast:
             # for now we simply create a single sample for each analysis time
             # and then take the first (2 + ar_steps) forecast times. In
-            # addition we only use the first ensemble member (if ensemble data
-            # has been provided).
+            # If ensemble data is enabled, each analysis time contributes one
+            # sample per ensemble member by default.
             # This means that for each analysis time we get a single sample
 
             if self.datastore.is_ensemble:
