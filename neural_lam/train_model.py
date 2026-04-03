@@ -16,6 +16,7 @@ from . import utils
 from .config import load_config_and_datastore
 from .models import MODELS, ForecasterModule
 from .models.ar_forecaster import ARForecaster
+from .models.ensemble_ar_forecaster import EnsembleARForecaster
 from .weather_dataset import WeatherDataModule
 
 
@@ -122,6 +123,14 @@ def main(input_args=None):
         action="store_true",
         help="If models should additionally output std.-dev. per "
         "output dimensions",
+    )
+    parser.add_argument(
+        "--num_pred_samples",
+        type=int,
+        default=1,
+        help="Number of forecast samples to generate per batch item during "
+        "autoregressive rollout. Values > 1 enable the batched "
+        "EnsembleARForecaster path.",
     )
 
     # Training options
@@ -296,7 +305,14 @@ def main(input_args=None):
         num_future_forcing_steps=args.num_future_forcing_steps,
         output_std=args.output_std,
     )
-    forecaster = ARForecaster(predictor, datastore)
+    if args.num_pred_samples > 1:
+        forecaster = EnsembleARForecaster(
+            predictor=predictor,
+            datastore=datastore,
+            num_pred_samples=args.num_pred_samples,
+        )
+    else:
+        forecaster = ARForecaster(predictor, datastore)
 
     model = ForecasterModule(
         forecaster=forecaster,

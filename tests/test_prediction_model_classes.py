@@ -6,6 +6,7 @@ import torch
 # First-party
 from neural_lam import config as nlconfig
 from neural_lam.models.ar_forecaster import ARForecaster
+from neural_lam.models.ensemble_ar_forecaster import EnsembleARForecaster
 from neural_lam.models.forecaster import ForecastResult, Forecaster
 from neural_lam.models.forecaster_module import ForecasterModule
 from neural_lam.models.step_predictor import StepPredictor
@@ -503,3 +504,134 @@ def test_forecaster_module_rejects_invalid_pred_std_shape():
         ForecasterModule._validate_forecast_result(
             invalid_result, target_states
         )
+
+
+def test_ensemble_ar_forecaster_returns_sample_dimension():
+    datastore = DummyDatastore()
+    config = nlconfig.NeuralLAMConfig(
+        datastore=nlconfig.DatastoreSelection(
+            kind=datastore.SHORT_NAME, config_path=datastore.root_path
+        )
+    )
+    predictor = MockStepPredictor(
+        config=config,
+        datastore=datastore,
+        output_std=True,
+    )
+    forecaster = EnsembleARForecaster(
+        predictor=predictor,
+        datastore=datastore,
+        num_pred_samples=4,
+    )
+
+    batch_size = 2
+    pred_steps = 3
+    num_grid_nodes = predictor.num_grid_nodes
+    d_state = datastore.get_num_data_vars(category="state")
+    d_forcing = datastore.get_num_data_vars(category="forcing")
+
+    init_states = torch.ones(batch_size, 2, num_grid_nodes, d_state)
+    forcing_features = torch.ones(
+        batch_size, pred_steps, num_grid_nodes, d_forcing
+    )
+    boundary_states = (
+        torch.ones(batch_size, pred_steps, num_grid_nodes, d_state) * 5.0
+    )
+
+    forecast_result = forecaster(init_states, forcing_features, boundary_states)
+    assert isinstance(forecast_result, ForecastResult)
+    assert forecast_result.is_ensemble_prediction
+    assert forecast_result.prediction.shape == (
+        batch_size,
+        4,
+        pred_steps,
+        num_grid_nodes,
+        d_state,
+    )
+    assert forecast_result.pred_std is not None
+    assert forecast_result.pred_std.shape == forecast_result.prediction.shape
+
+
+def test_ensemble_ar_forecaster_requires_output_std_for_sampling():
+    datastore = DummyDatastore()
+    config = nlconfig.NeuralLAMConfig(
+        datastore=nlconfig.DatastoreSelection(
+            kind=datastore.SHORT_NAME, config_path=datastore.root_path
+        )
+    )
+    predictor = MockStepPredictor(
+        config=config,
+        datastore=datastore,
+        output_std=False,
+    )
+
+    with pytest.raises(
+        ValueError, match="requires a predictor with output_std"
+    ):
+        EnsembleARForecaster(
+            predictor=predictor,
+            datastore=datastore,
+            num_pred_samples=4,
+        )
+
+
+def test_forecaster_module_routes_ensemble_predictions_to_mean_path():
+    datastore = DummyDatastore()
+    config = nlconfig.NeuralLAMConfig(
+        datastore=nlconfig.DatastoreSelection(
+            kind=datastore.SHORT_NAME, config_path=datastore.root_path
+        )
+    )
+    model = ForecasterModule(
+        forecaster=MockStructuredEnsembleForecaster(ensemble_size=4),
+        config=config,
+        datastore=datastore,
+        loss="mse",
+        lr=1e-3,
+        restore_opt=False,
+        n_example_pred=1,
+        val_steps_to_log=[1],
+        metrics_watch=[],
+    )
+
+    batch_size = 2
+    pred_steps = 3
+    num_grid_nodes = datastore.num_grid_points
+    d_state = datastore.get_num_data_vars(category="state")
+    d_forcing = datastore.get_num_data_vars(category="forcing")
+
+    batch = (
+        torch.zeros(batch_size, 2, num_grid_nodes, d_state),
+        torch.ones(batch_size, pred_steps, num_grid_nodes, d_state),
+        torch.zeros(batch_size, pred_steps, num_grid_nodes, d_forcing),
+        torch.zeros(batch_size, pred_steps, dtype=torch.int64),
+    )
+
+    forecast_result, target_states = model.forecast_result_for_batch(batch)
+    reduced_prediction, reduced_pred_std = model._reduce_ensemble_prediction(
+        forecast_result
+    )
+    assert reduced_prediction.shape == target_states.shape
+    assert reduced_pred_std is not None
+    assert reduced_pred_std.shape == target_states.shape
+
+    loss = model.training_step(batch)
+    assert torch.isfinite(loss)
+
+    model.validation_step(batch, batch_idx=0)
+    assert "ensemble_mse" in model.val_metrics
+    assert "ensemble_spread" in model.val_metrics
+
+    model._trainer = type(
+        "DummyTrainer",
+        (),
+        {
+            "is_global_zero": False,
+            "sanity_checking": False,
+            "current_epoch": 0,
+        },
+    )()
+    model.test_step(batch, batch_idx=0)
+    assert "ensemble_mse" in model.test_metrics
+    assert "ensemble_mae" in model.test_metrics
+    assert "ensemble_spread" in model.test_metrics

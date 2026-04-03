@@ -256,8 +256,41 @@ class ForecasterModule(pl.LightningModule):
                 f"pred_std {tuple(pred_std.shape)}."
             )
 
+    @staticmethod
+    def _reduce_ensemble_prediction(
+        forecast_result: ForecastResult,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Reduce ensemble predictions to the deterministic contract expected by
+        the existing loss/metric code paths.
+        """
+        prediction = forecast_result.prediction
+        pred_std = forecast_result.pred_std
+
+        if not forecast_result.is_ensemble_prediction:
+            return prediction, pred_std
+
+        prediction = torch.mean(prediction, dim=1)
+        if pred_std is not None and pred_std.ndim == 5:
+            pred_std = torch.mean(pred_std, dim=1)
+
+        return prediction, pred_std
+
+    def _compute_ensemble_spread_metric(
+        self, prediction: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute entrywise ensemble spread reduced to (B, T, d_f)."""
+        entry_spread = torch.std(prediction, dim=1, correction=0)
+        return metrics.mask_and_reduce_metric(
+            entry_spread,
+            mask=self.interior_mask_bool,
+            average_grid=True,
+            sum_vars=False,
+        )
+
     def training_step(self, batch):
-        prediction, target_states, pred_std = self.forecast_for_batch(batch)
+        forecast_result, target_states = self.forecast_result_for_batch(batch)
+        prediction, pred_std = self._reduce_ensemble_prediction(forecast_result)
         if pred_std is None:
             pred_std = self.per_var_std
 
@@ -291,7 +324,8 @@ class ForecasterModule(pl.LightningModule):
 
     # pylint: disable-next=unused-argument
     def validation_step(self, batch, batch_idx):
-        prediction, target_states, pred_std = self.forecast_for_batch(batch)
+        forecast_result, target_states = self.forecast_result_for_batch(batch)
+        prediction, pred_std = self._reduce_ensemble_prediction(forecast_result)
         if pred_std is None:
             pred_std = self.per_var_std
 
@@ -327,7 +361,15 @@ class ForecasterModule(pl.LightningModule):
             mask=self.interior_mask_bool,
             sum_vars=False,
         )
-        self.val_metrics["mse"].append(entry_mses)
+        metric_name = (
+            "ensemble_mse" if forecast_result.is_ensemble_prediction else "mse"
+        )
+        self.val_metrics.setdefault(metric_name, []).append(entry_mses)
+
+        if forecast_result.is_ensemble_prediction:
+            self.val_metrics.setdefault("ensemble_spread", []).append(
+                self._compute_ensemble_spread_metric(forecast_result.prediction)
+            )
 
     def on_validation_epoch_end(self):
         self.aggregate_and_plot_metrics(self.val_metrics, prefix="val")
@@ -336,7 +378,8 @@ class ForecasterModule(pl.LightningModule):
 
     # pylint: disable-next=unused-argument
     def test_step(self, batch, batch_idx):
-        prediction, target_states, pred_std = self.forecast_for_batch(batch)
+        forecast_result, target_states = self.forecast_result_for_batch(batch)
+        prediction, pred_std = self._reduce_ensemble_prediction(forecast_result)
 
         if pred_std is not None:
             mean_pred_std = torch.mean(
@@ -373,8 +416,13 @@ class ForecasterModule(pl.LightningModule):
             batch_size=batch[0].shape[0],
         )
 
-        for metric_name in ("mse", "mae"):
-            metric_func = metrics.get_metric(metric_name)
+        metric_name_map = (
+            {"ensemble_mse": "mse", "ensemble_mae": "mae"}
+            if forecast_result.is_ensemble_prediction
+            else {"mse": "mse", "mae": "mae"}
+        )
+        for metric_name, base_metric_name in metric_name_map.items():
+            metric_func = metrics.get_metric(base_metric_name)
             batch_metric_vals = metric_func(
                 prediction,
                 target_states,
@@ -382,7 +430,14 @@ class ForecasterModule(pl.LightningModule):
                 mask=self.interior_mask_bool,
                 sum_vars=False,
             )
-            self.test_metrics[metric_name].append(batch_metric_vals)
+            self.test_metrics.setdefault(metric_name, []).append(
+                batch_metric_vals
+            )
+
+        if forecast_result.is_ensemble_prediction:
+            self.test_metrics.setdefault("ensemble_spread", []).append(
+                self._compute_ensemble_spread_metric(forecast_result.prediction)
+            )
 
         spatial_loss = self.loss(
             prediction, target_states, pred_std, average_grid=False
