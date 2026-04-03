@@ -443,7 +443,7 @@ def test_forecaster_module_accepts_ensemble_shape_contract():
         forecaster=MockStructuredEnsembleForecaster(ensemble_size=4),
         config=config,
         datastore=datastore,
-        loss="nll",
+        loss="mse",
         lr=1e-3,
         restore_opt=False,
         n_example_pred=1,
@@ -479,6 +479,44 @@ def test_forecaster_module_accepts_ensemble_shape_contract():
     assert prediction.shape == forecast_result.prediction.shape
     assert pred_std is not None
     assert pred_std.shape == prediction.shape
+
+
+def test_forecaster_module_rejects_unsupported_ensemble_loss():
+    datastore = DummyDatastore()
+    config = nlconfig.NeuralLAMConfig(
+        datastore=nlconfig.DatastoreSelection(
+            kind=datastore.SHORT_NAME, config_path=datastore.root_path
+        )
+    )
+    model = ForecasterModule(
+        forecaster=MockStructuredEnsembleForecaster(ensemble_size=4),
+        config=config,
+        datastore=datastore,
+        loss="nll",
+        lr=1e-3,
+        restore_opt=False,
+        n_example_pred=1,
+        val_steps_to_log=[1],
+        metrics_watch=[],
+    )
+
+    batch_size = 2
+    pred_steps = 3
+    num_grid_nodes = datastore.num_grid_points
+    d_state = datastore.get_num_data_vars(category="state")
+    d_forcing = datastore.get_num_data_vars(category="forcing")
+
+    batch = (
+        torch.zeros(batch_size, 2, num_grid_nodes, d_state),
+        torch.ones(batch_size, pred_steps, num_grid_nodes, d_state),
+        torch.zeros(batch_size, pred_steps, num_grid_nodes, d_forcing),
+        torch.zeros(batch_size, pred_steps, dtype=torch.int64),
+    )
+
+    with pytest.raises(
+        ValueError, match="currently support only mae, mse losses"
+    ):
+        model.forecast_result_for_batch(batch)
 
 
 def test_forecaster_module_rejects_invalid_prediction_shape():
@@ -622,6 +660,7 @@ def test_forecaster_module_routes_ensemble_predictions_to_mean_path():
     assert "ensemble_mse" in model.val_metrics
     assert "ensemble_spread" in model.val_metrics
 
+    model.log_dict = lambda *args, **kwargs: None
     model._trainer = type(
         "DummyTrainer",
         (),
@@ -635,3 +674,41 @@ def test_forecaster_module_routes_ensemble_predictions_to_mean_path():
     assert "ensemble_mse" in model.test_metrics
     assert "ensemble_mae" in model.test_metrics
     assert "ensemble_spread" in model.test_metrics
+
+
+def test_aggregate_and_plot_metrics_skips_empty_metric_lists():
+    datastore = DummyDatastore()
+    config = nlconfig.NeuralLAMConfig(
+        datastore=nlconfig.DatastoreSelection(
+            kind=datastore.SHORT_NAME, config_path=datastore.root_path
+        )
+    )
+    model = ForecasterModule(
+        forecaster=MockStructuredEnsembleForecaster(ensemble_size=4),
+        config=config,
+        datastore=datastore,
+        loss="mse",
+        lr=1e-3,
+        restore_opt=False,
+        n_example_pred=1,
+        val_steps_to_log=[1],
+        metrics_watch=[],
+    )
+    model._trainer = type(
+        "DummyTrainer",
+        (),
+        {
+            "is_global_zero": False,
+            "sanity_checking": False,
+            "current_epoch": 0,
+        },
+    )()
+    model.all_gather_cat = lambda tensor: tensor
+
+    model.aggregate_and_plot_metrics(
+        metrics_dict={
+            "mse": [],
+            "ensemble_mse": [torch.ones(2, 3, datastore.N_FEATURES["state"])],
+        },
+        prefix="val",
+    )

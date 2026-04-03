@@ -233,6 +233,13 @@ def main(input_args=None):
         int(k): v for k, v in json.loads(args.var_leads_metrics_watch).items()
     }
 
+    if args.num_pred_samples > 1 and args.loss.lower() not in ("mse", "mae"):
+        raise ValueError(
+            "The initial batched ensemble path currently supports only "
+            "mse/mae losses through the ensemble-mean route. "
+            f"Got loss='{args.loss}'."
+        )
+
     # Check that config only specifies logging for lead times that exist
     # Check --val_steps_to_log
     for step in args.val_steps_to_log:

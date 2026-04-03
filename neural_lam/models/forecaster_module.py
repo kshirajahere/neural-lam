@@ -29,6 +29,7 @@ class ForecasterModule(pl.LightningModule):
     """
 
     # pylint: disable=arguments-differ
+    SUPPORTED_ENSEMBLE_MEAN_LOSSES = {"mse", "mae"}
 
     def __init__(
         self,
@@ -60,6 +61,7 @@ class ForecasterModule(pl.LightningModule):
         self.save_hyperparameters(ignore=["datastore", "forecaster"])
         self.datastore = datastore
         self.forecaster = forecaster
+        self.loss_name = loss.lower()
 
         # Compute interior_mask_bool directly from datastore
         boundary_mask = (
@@ -154,6 +156,7 @@ class ForecasterModule(pl.LightningModule):
             self.forecaster(init_states, forcing_features, target_states)
         )
         self._validate_forecast_result(forecast_result, target_states)
+        self._validate_ensemble_loss_support(forecast_result)
         return forecast_result, target_states
 
     def forecast_for_batch(self, batch):
@@ -254,6 +257,25 @@ class ForecasterModule(pl.LightningModule):
                 "pred_std must either match prediction shape or be shaped "
                 f"(d_f,). Got prediction {tuple(prediction.shape)} and "
                 f"pred_std {tuple(pred_std.shape)}."
+            )
+
+    def _validate_ensemble_loss_support(
+        self, forecast_result: ForecastResult
+    ) -> None:
+        """
+        The initial ensemble path on top of #208 only supports deterministic
+        mean-path losses. Sample-aware probabilistic objectives belong in a
+        dedicated follow-on slice.
+        """
+        if (
+            forecast_result.is_ensemble_prediction
+            and self.loss_name not in self.SUPPORTED_ENSEMBLE_MEAN_LOSSES
+        ):
+            supported = ", ".join(sorted(self.SUPPORTED_ENSEMBLE_MEAN_LOSSES))
+            raise ValueError(
+                "Ensemble forecasters currently support only "
+                f"{supported} losses via the ensemble-mean path. "
+                f"Got '{self.loss_name}'."
             )
 
     @staticmethod
@@ -619,6 +641,8 @@ class ForecasterModule(pl.LightningModule):
     def aggregate_and_plot_metrics(self, metrics_dict, prefix):
         log_dict = {}
         for metric_name, metric_val_list in metrics_dict.items():
+            if not metric_val_list:
+                continue
             metric_tensor = self.all_gather_cat(
                 torch.cat(metric_val_list, dim=0)
             )
