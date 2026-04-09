@@ -227,6 +227,44 @@ def crps_gauss(
     )
 
 
+def crps_ensemble(
+    pred, target, pred_std, mask=None, average_grid=True, sum_vars=True
+):
+    """
+    Empirical CRPS for ensemble forecasts.
+
+    pred: (B, S, T, N, d_state), ensemble prediction
+    target: (B, T, N, d_state), target
+    pred_std: unused, kept for compatibility with the existing metric API
+    """
+    if pred.ndim != 5:
+        raise ValueError(
+            "crps_ensemble expects predictions with shape "
+            "(B, S, T, N, d_state)"
+        )
+    if target.ndim != 4:
+        raise ValueError(
+            "crps_ensemble expects targets with shape (B, T, N, d_state)"
+        )
+
+    # First CRPS term: E |X - y|
+    target_expanded = target.unsqueeze(1)
+    ensemble_target_distance = torch.mean(
+        torch.abs(pred - target_expanded), dim=1
+    )  # (B, T, N, d_state)
+
+    # Second CRPS term: 0.5 E |X - X'|
+    pairwise_distance = torch.abs(pred.unsqueeze(2) - pred.unsqueeze(1))
+    ensemble_spread_penalty = 0.5 * torch.mean(
+        pairwise_distance, dim=(1, 2)
+    )  # (B, T, N, d_state)
+
+    entry_crps = ensemble_target_distance - ensemble_spread_penalty
+    return mask_and_reduce_metric(
+        entry_crps, mask=mask, average_grid=average_grid, sum_vars=sum_vars
+    )
+
+
 DEFINED_METRICS = {
     "mse": mse,
     "mae": mae,
@@ -234,4 +272,5 @@ DEFINED_METRICS = {
     "wmae": wmae,
     "nll": nll,
     "crps_gauss": crps_gauss,
+    "crps_ensemble": crps_ensemble,
 }

@@ -13,13 +13,14 @@ from loguru import logger
 # Local
 from . import utils
 from .config import load_config_and_datastore
-from .models import GraphLAM, HiLAM, HiLAMParallel
+from .models import GraphLAM, HiLAM, HiLAMParallel, NoiseEnsembleGraphLAM
 from .weather_dataset import WeatherDataModule
 
 MODELS = {
     "graph_lam": GraphLAM,
     "hi_lam": HiLAM,
     "hi_lam_parallel": HiLAMParallel,
+    "noise_ensemble_graph_lam": NoiseEnsembleGraphLAM,
 }
 
 
@@ -115,6 +116,27 @@ def main(input_args=None):
         help="If models should additionally output std.-dev. per "
         "output dimensions "
         "(default: False (no))",
+    )
+    parser.add_argument(
+        "--num_pred_samples",
+        type=int,
+        default=4,
+        help="Number of ensemble samples to generate for prototype "
+        "ensemble models (default: 4)",
+    )
+    parser.add_argument(
+        "--noise_dim",
+        type=int,
+        default=8,
+        help="Dimensionality of the per-step noise vector used by "
+        "prototype ensemble models (default: 8)",
+    )
+    parser.add_argument(
+        "--noise_scale",
+        type=float,
+        default=1.0,
+        help="Std.-dev. of the Gaussian step noise used by prototype "
+        "ensemble models (default: 1.0)",
     )
 
     # Training options
